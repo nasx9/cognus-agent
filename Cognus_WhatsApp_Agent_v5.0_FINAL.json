@@ -1,0 +1,687 @@
+{
+  "name": "Cognus WhatsApp Agent v5.0",
+  "nodes": [
+    {
+      "id": "1",
+      "name": "Webhook WhatsApp Evolution",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 1,
+      "position": [
+        250,
+        300
+      ],
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "cognus-whatsapp",
+        "responseMode": "lastNode",
+        "options": {}
+      }
+    },
+    {
+      "id": "2",
+      "name": "playload",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 1,
+      "position": [
+        450,
+        300
+      ],
+      "parameters": {
+        "language": "JavaScript",
+        "jsCode": "// Parser v5.0 - Extrai e valida dados do payload Evolution API\\nconst items = $input.all();\\nconst results = [];\\n\\nfor (const item of items) {\\n  try {\\n    const body = item.json.body || item.json;\\n    const data = body.data || body;\\n\\n    // Extração de dados\\n    const from = data.key?.remoteJid || data.from || '';\\n    const fromName = data.pushName || data.fromName || 'Paciente';\\n    const messageType = data.message?.conversation ? 'text' :\\n                       data.message?.extendedTextMessage ? 'text' :\\n                       data.message?.audioMessage ? 'audio' :\\n                       data.message?.imageMessage ? 'image' :\\n                       data.message?.videoMessage ? 'video' :\\n                       data.message?.documentMessage ? 'document' : 'unknown';\\n\\n    // Extração de texto\\n    let text = '';\\n    if (data.message?.conversation) {\\n      text = data.message.conversation;\\n    } else if (data.message?.extendedTextMessage?.text) {\\n      text = data.message.extendedTextMessage.text;\\n    }\\n\\n    // Extração de URL de áudio\\n    let audioUrl = null;\\n    if (messageType === 'audio' && data.message?.audioMessage?.url) {\\n      audioUrl = data.message.audioMessage.url;\\n    }\\n\\n    // Validação de número de telefone\\n    const phoneRegex = /^\\\\d{10,15}@/;\\n    if (!phoneRegex.test(from)) {\\n      throw new Error(`Número de telefone inválido: ${from}`);\\n    }\\n\\n    // Criação do sessionId (crítico para o Redis Chat Memory)\\n    const sessionId = from.split('@')[0];\\n\\n    // Timestamp\\n    const timestamp = data.messageTimestamp || Math.floor(Date.now() / 1000);\\n\\n    // Resultado\\n    results.push({\\n      json: {\\n        sessionId: sessionId,  // CAMPO CRÍTICO\\n        dataw: {\\n          event: body.event || 'messages.upsert',\\n          instance: body.instance || 'cognus',\\n          from: from,\\n          fromName: fromName,\\n          message: text,\\n          type: messageType,\\n          audioUrl: audioUrl,\\n          timestamp: timestamp\\n        }\\n      }\\n    });\\n\\n  } catch (error) {\\n    // Em caso de erro, retorna um objeto de erro\\n    results.push({\\n      json: {\\n        error: true,\\n        errorMessage: error.message,\\n        originalPayload: item.json\\n      }\\n    });\\n  }\\n}\\n\\nreturn results;"
+      }
+    },
+    {
+      "id": "3",
+      "name": "Switch1",
+      "type": "n8n-nodes-base.switch",
+      "typeVersion": 1,
+      "position": [
+        650,
+        300
+      ],
+      "parameters": {
+        "mode": "rules",
+        "rules": {
+          "rules": [
+            {
+              "conditions": {
+                "string": [
+                  {
+                    "value1": "={{ $json.dataw.type }}",
+                    "operation": "equals",
+                    "value2": "text"
+                  }
+                ]
+              },
+              "renameOutput": true,
+              "outputKey": "texto"
+            },
+            {
+              "conditions": {
+                "string": [
+                  {
+                    "value1": "={{ $json.dataw.type }}",
+                    "operation": "equals",
+                    "value2": "audio"
+                  }
+                ]
+              },
+              "renameOutput": true,
+              "outputKey": "audio"
+            }
+          ]
+        },
+        "options": {}
+      }
+    },
+    {
+      "id": "4",
+      "name": "Download Audio",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 1,
+      "position": [
+        850,
+        400
+      ],
+      "parameters": {
+        "url": "={{ $json.dataw.audioUrl }}",
+        "method": "GET",
+        "responseFormat": "file",
+        "options": {
+          "timeout": 30000
+        }
+      }
+    },
+    {
+      "id": "5",
+      "name": "transcript",
+      "type": "n8n-nodes-base.openAi",
+      "typeVersion": 1,
+      "position": [
+        1050,
+        400
+      ],
+      "parameters": {
+        "resource": "audio",
+        "operation": "transcribe",
+        "model": "whisper-1",
+        "binaryPropertyName": "data",
+        "options": {}
+      }
+    },
+    {
+      "id": "6",
+      "name": "Set Transcription",
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 1,
+      "position": [
+        1250,
+        400
+      ],
+      "parameters": {
+        "values": {
+          "string": [
+            {
+              "name": "dataw.message",
+              "value": "={{ $json.text }}"
+            }
+          ]
+        },
+        "options": {
+          "keepOnlySet": false
+        }
+      }
+    },
+    {
+      "id": "7",
+      "name": "push",
+      "type": "n8n-nodes-base.redis",
+      "typeVersion": 1,
+      "position": [
+        1050,
+        300
+      ],
+      "parameters": {
+        "operation": "push",
+        "list": "={{ $json.sessionId }}:buffer",
+        "messageData": "={{ $json.dataw.message }}",
+        "options": {
+          "ttl": 300
+        }
+      }
+    },
+    {
+      "id": "8",
+      "name": "Wait",
+      "type": "n8n-nodes-base.wait",
+      "typeVersion": 1,
+      "position": [
+        1250,
+        300
+      ],
+      "parameters": {
+        "resume": "after",
+        "amount": 5,
+        "unit": "seconds"
+      }
+    },
+    {
+      "id": "9",
+      "name": "msgs",
+      "type": "n8n-nodes-base.redis",
+      "typeVersion": 1,
+      "position": [
+        1450,
+        300
+      ],
+      "parameters": {
+        "operation": "lrange",
+        "list": "={{ $json.sessionId }}:buffer",
+        "start": 0,
+        "end": -1
+      }
+    },
+    {
+      "id": "10",
+      "name": "junta_msgs",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 1,
+      "position": [
+        1650,
+        300
+      ],
+      "parameters": {
+        "language": "JavaScript",
+        "jsCode": "const items = $input.all();\\nconst results = [];\\n\\nfor (const item of items) {\\n  const messages = item.json.list || [];\\n  const formattedHistory = messages.map((msg, index) => {\\n    return `Mensagem ${index + 1}: ${msg}`;\\n  }).join('\\n');\\n\\n  results.push({\\n    json: {\\n      ...item.json,\\n      conversationHistory: formattedHistory\\n    }\\n  });\\n}\\n\\nreturn results;"
+      }
+    },
+    {
+      "id": "11",
+      "name": "AI Agent",
+      "type": "n8n-nodes-base.openAi",
+      "typeVersion": 1,
+      "position": [
+        1850,
+        300
+      ],
+      "parameters": {
+        "resource": "chat",
+        "operation": "message",
+        "model": "gpt-4o",
+        "messages": {
+          "values": [
+            {
+              "role": "system",
+              "content": "Você é o assistente virtual da Clínica Cognus, uma clínica especializada em saúde mental e desenvolvimento infantil. Sua função é classificar as solicitações dos pacientes e fornecer respostas precisas e humanizadas.\n\n## CORPO CLÍNICO (12 profissionais)\n\n### Médicos\n- Dr. Tiago Figueiredo, MD, Ph.D. - Psiquiatra (Co-fundador, Criador do Programa VOAR)\n- Dra. Mariana Leão, MD. - Cardiologista\n- Dr. Diêgo Figueiredo, MD. - Nefrologista\n- Dra. Anna Gabriela, MD. - Endocrinologista\n- Dr. Allan Marinho - Psiquiatra\n\n### Terapeutas e Psicólogos\n- Karla Valente Sanches - Neuropsicóloga\n- Ana Carolina Caputo Aucélio Rabetti - Fonoaudióloga\n- Wesley Oliveira - Terapeuta Ocupacional\n- Juliana Nogueira, MSc. - Psicóloga\n- Gleisse Nunes Pires da Silva - Psicóloga, Educadora Parental\n- Ana Paula Gheller - Psicóloga\n- Camila Barros Ribeiro - Neuropsicóloga\n\n## ESPECIALIDADES (13)\nPsiquiatria, Cardiologia, Nefrologia, Endocrinologia, Cirurgia Vascular, Psicologia, Educação Parental, Fonoaudiologia, Neuropsicologia, Neuropsicopedagogia, Terapia Ocupacional, Avaliação do Perfil Cognitivo, Avaliação da Cognição Social\n\n## TERAPIAS E PROGRAMAS (6 + 2)\n- Fonoaudiologia\n- Psicoterapia\n- Psicopedagogia\n- Terapia Ocupacional\n- Educação Parental\n- Neuropsicologia\n- **Programa VOAR**: Vida, Organização, Autonomia e Habilidades - Protocolo internacional para crianças e adolescentes com TDAH, criado pelo Dr. Tiago Figueiredo\n- **Programa de Leitura e Escrita**: Protocolo para dificuldades de aprendizagem\n\n## REGRAS DE NEGÓCIO\n1. **Agendamentos**: Psiquiatria e Avaliação Neuropsicológica SEMPRE exigem handoff humano.\n2. **Receitas Controladas**: Perguntar a localização (DF, RJ ou outra).\n3. **Convênio**: A clínica atende apenas particular.\n4. **Relatórios/Laudos**: Devem ser solicitados por e-mail: contato@clinicacognus.com.br\n\n## ESTRUTURA DE RESPOSTA (JSON)\nVocê DEVE responder SEMPRE em JSON com a seguinte estrutura:\n{\n  \"intent\": \"<receita|agendamento|terapia|relatorio|envio_documento|duvida>\",\n  \"sub_intent\": {},\n  \"response_type\": \"<fixed|generated>\",\n  \"response_text\": \"<string ou null>\",\n  \"handoff_needed\": <boolean>,\n  \"handoff_reason\": \"<string ou null>\"\n}\n\n### Campos:\n- **intent**: A intenção principal do usuário\n- **sub_intent**: Detalhes (ex: {\"especialidade\": \"cardiologia\", \"tipo_receita\": \"controlada\", \"localizacao\": \"df\"})\n- **response_type**: \"fixed\" para fluxos críticos (agendamento, receita), \"generated\" para dúvidas e terapias\n- **response_text**: Texto da resposta (apenas se response_type = \"generated\")\n- **handoff_needed**: true para Psiquiatria, Neuropsicologia, reclamações\n- **handoff_reason**: Motivo do handoff\n\n## EXEMPLOS\nUsuário: \"Quero agendar com um cardiologista\"\nResposta:\n{\n  \"intent\": \"agendamento\",\n  \"sub_intent\": {\"especialidade\": \"cardiologia\"},\n  \"response_type\": \"fixed\",\n  \"response_text\": null,\n  \"handoff_needed\": false,\n  \"handoff_reason\": null\n}\n\nUsuário: \"Preciso de uma receita azul, moro em Brasília\"\nResposta:\n{\n  \"intent\": \"receita\",\n  \"sub_intent\": {\"tipo_receita\": \"controlada\", \"localizacao\": \"df\"},\n  \"response_type\": \"fixed\",\n  \"response_text\": null,\n  \"handoff_needed\": false,\n  \"handoff_reason\": null\n}\n\nUsuário: \"O que é o programa VOAR?\"\nResposta:\n{\n  \"intent\": \"terapia\",\n  \"sub_intent\": {\"tipo_terapia\": \"voar\"},\n  \"response_type\": \"generated\",\n  \"response_text\": \"O Programa VOAR (Vida, Organização, Autonomia e Habilidades) é um protocolo internacional criado pelo Dr. Tiago Figueiredo, focado no tratamento de crianças e adolescentes com TDAH. Ele envolve a participação ativa da família e trabalha habilidades como autonomia, regulação emocional e competência social. Gostaria de saber mais?\",\n  \"handoff_needed\": false,\n  \"handoff_reason\": null\n}\n\nRetorne sempre exatamente nesse formato JSON."
+            },
+            {
+              "role": "user",
+              "content": "={{ $json.conversationHistory }}"
+            }
+          ]
+        },
+        "options": {
+          "temperature": 0.3,
+          "responseFormat": "json_object"
+        }
+      }
+    },
+    {
+      "id": "12",
+      "name": "Switch por Intenção",
+      "type": "n8n-nodes-base.switch",
+      "typeVersion": 1,
+      "position": [
+        2050,
+        300
+      ],
+      "parameters": {
+        "mode": "rules",
+        "rules": {
+          "rules": [
+            {
+              "conditions": {
+                "string": [
+                  {
+                    "value1": "={{ $json.message.content.intent }}",
+                    "operation": "equals",
+                    "value2": "receita"
+                  }
+                ]
+              },
+              "renameOutput": true,
+              "outputKey": "receita"
+            },
+            {
+              "conditions": {
+                "string": [
+                  {
+                    "value1": "={{ $json.message.content.intent }}",
+                    "operation": "equals",
+                    "value2": "agendamento"
+                  }
+                ]
+              },
+              "renameOutput": true,
+              "outputKey": "agendamento"
+            },
+            {
+              "conditions": {
+                "string": [
+                  {
+                    "value1": "={{ $json.message.content.intent }}",
+                    "operation": "equals",
+                    "value2": "terapia"
+                  }
+                ]
+              },
+              "renameOutput": true,
+              "outputKey": "terapia"
+            },
+            {
+              "conditions": {
+                "string": [
+                  {
+                    "value1": "={{ $json.message.content.intent }}",
+                    "operation": "equals",
+                    "value2": "relatorio"
+                  }
+                ]
+              },
+              "renameOutput": true,
+              "outputKey": "relatorio"
+            },
+            {
+              "conditions": {
+                "boolean": [
+                  {
+                    "value1": "={{ $json.message.content.handoff_needed }}",
+                    "operation": "equals",
+                    "value2": true
+                  }
+                ]
+              },
+              "renameOutput": true,
+              "outputKey": "handoff"
+            }
+          ]
+        },
+        "options": {}
+      }
+    },
+    {
+      "id": "13",
+      "name": "Processar Receita",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 1,
+      "position": [
+        2250,
+        200
+      ],
+      "parameters": {
+        "language": "JavaScript",
+        "jsCode": "const items = $input.all();\\nconst results = [];\\n\\nfor (const item of items) {\\n  const aiResponse = item.json.message.content;\\n  const subIntent = aiResponse.sub_intent || {};\\n  const tipoReceita = subIntent.tipo_receita;\\n  const localizacao = subIntent.localizacao;\\n\\n  let mensagem = '';\\n  let trelloList = null;\\n\\n  if (tipoReceita === 'branca') {\\n    mensagem = 'Receita branca confirmada! O Dr. Tiago enviará sua receita diretamente pelo aplicativo da clínica em até 24 horas. 📋';\\n  } else if (tipoReceita === 'controlada') {\\n    if (!localizacao) {\\n      mensagem = 'Para continuar com sua receita controlada, por favor, me informe sua cidade e estado. 📍';\\n    } else {\\n      const protocolo = `REC-${Date.now().toString().slice(-6)}`;\\n\\n      if (localizacao === 'df') {\\n        mensagem = `Receita controlada confirmada para Brasília/DF! ✅\\\\n\\\\nSua receita será preparada e você pode retirá-la na clínica em até 48 horas.\\\\n\\\\n📋 Protocolo: ${protocolo}`;\\n        trelloList = 'Receitas DF';\\n      } else if (localizacao === 'rj') {\\n        mensagem = `Receita controlada confirmada para Rio de Janeiro/RJ! ✅\\\\n\\\\nSua receita será preparada e você pode retirá-la na clínica em até 48 horas.\\\\n\\\\n📋 Protocolo: ${protocolo}`;\\n        trelloList = 'Receitas RJ';\\n      } else {\\n        mensagem = `Receita controlada confirmada! ✅\\\\n\\\\nSua receita será enviada pelos Correios em até 5 dias úteis.\\\\n\\\\n📋 Protocolo: ${protocolo}`;\\n        trelloList = 'Receitas Correios';\\n      }\\n    }\\n  } else {\\n    mensagem = 'Qual tipo de receita você precisa?\\\\n\\\\n1️⃣ Receita Branca\\\\n2️⃣ Receita Controlada (Azul/Amarela)';\\n  }\\n\\n  results.push({\\n    json: {\\n      ...item.json,\\n      responseMessage: mensagem,\\n      trelloList: trelloList\\n    }\\n  });\\n}\\n\\nreturn results;"
+      }
+    },
+    {
+      "id": "14",
+      "name": "Processar Agendamento",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 1,
+      "position": [
+        2250,
+        300
+      ],
+      "parameters": {
+        "language": "JavaScript",
+        "jsCode": "const items = $input.all();\\nconst results = [];\\n\\nconst especialidadesComProfissionais = {\\n  'cardiologia': 'Excelente escolha! A especialidade de Cardiologia é atendida pela **Dra. Mariana Leão, MD.**, uma profissional de referência na área. Para agendar sua consulta, entre em contato pelo telefone (61) 3964-9899 ou pelo WhatsApp (61) 99999-9999. 📅',\\n  'nefrologia': 'Excelente escolha! A especialidade de Nefrologia é atendida pelo **Dr. Diêgo Figueiredo, MD.**, Responsável Técnico da clínica. Para agendar sua consulta, entre em contato pelo telefone (61) 3964-9899 ou pelo WhatsApp (61) 99999-9999. 📅',\\n  'endocrinologia': 'Excelente escolha! A especialidade de Endocrinologia é atendida pela **Dra. Anna Gabriela, MD.**. Para agendar sua consulta, entre em contato pelo telefone (61) 3964-9899 ou pelo WhatsApp (61) 99999-9999. 📅',\\n  'psicologia': 'Excelente escolha! A especialidade de Psicologia é atendida por **Juliana Nogueira, MSc.** e **Ana Paula Gheller**. Para agendar sua consulta, entre em contato pelo telefone (61) 3964-9899 ou pelo WhatsApp (61) 99999-9999. 📅',\\n  'fonoaudiologia': 'Excelente escolha! A especialidade de Fonoaudiologia é atendida por **Ana Carolina Caputo Aucélio Rabetti**. Para agendar sua consulta, entre em contato pelo telefone (61) 3964-9899 ou pelo WhatsApp (61) 99999-9999. 📅',\\n  'terapia_ocupacional': 'Excelente escolha! A Terapia Ocupacional é atendida por **Wesley Oliveira**. Para agendar sua consulta, entre em contato pelo telefone (61) 3964-9899 ou pelo WhatsApp (61) 99999-9999. 📅',\\n  'educacao_parental': 'Excelente escolha! A Educação Parental é atendida por **Gleisse Nunes Pires da Silva**, certificada em Parentalidade Consciente. Para agendar sua consulta, entre em contato pelo telefone (61) 3964-9899 ou pelo WhatsApp (61) 99999-9999. 📅'\\n};\\n\\nfor (const item of items) {\\n  const aiResponse = item.json.message.content;\\n  const subIntent = aiResponse.sub_intent || {};\\n  const especialidade = subIntent.especialidade;\\n\\n  let mensagem = '';\\n\\n  if (!especialidade) {\\n    mensagem = 'Para qual especialidade você gostaria de agendar?\\\\n\\\\n🩺 **Médicas**: Psiquiatria, Cardiologia, Nefrologia, Endocrinologia, Cirurgia Vascular\\\\n\\\\n🧠 **Terapias e Avaliações**: Psicologia, Educação Parental, Fonoaudiologia, Neuropsicologia, Neuropsicopedagogia, Terapia Ocupacional, Avaliação do Perfil Cognitivo, Avaliação da Cognição Social';\\n  } else if (especialidade === 'psiquiatria' || especialidade === 'avaliacao_neuropsicologica') {\\n    mensagem = 'Entendi! Para agendamentos de Psiquiatria e Avaliação Neuropsicológica, vou transferir você para um de nossos atendentes que poderá te ajudar melhor. Aguarde um momento! 🙋‍♀️';\\n  } else {\\n    mensagem = especialidadesComProfissionais[especialidade] || 'Excelente escolha! Para agendar sua consulta, entre em contato pelo telefone (61) 3964-9899 ou pelo WhatsApp (61) 99999-9999. 📅';\\n  }\\n\\n  results.push({\\n    json: {\\n      ...item.json,\\n      responseMessage: mensagem\\n    }\\n  });\\n}\\n\\nreturn results;"
+      }
+    },
+    {
+      "id": "15",
+      "name": "Processar Terapia",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 1,
+      "position": [
+        2250,
+        400
+      ],
+      "parameters": {
+        "language": "JavaScript",
+        "jsCode": "const items = $input.all();\\nconst results = [];\\n\\nfor (const item of items) {\\n  const aiResponse = item.json.message.content;\\n  const responseText = aiResponse.response_text;\\n\\n  // Se a IA gerou uma resposta, usamos ela\\n  let mensagem = responseText || 'A Clínica Cognus oferece:\\\\n\\\\n🗣️ **Fonoaudiologia** (com Ana Carolina Rabetti)\\\\n🧠 **Psicoterapia** (com Juliana Nogueira e Ana Paula Gheller)\\\\n📚 **Psicopedagogia**\\\\n🎯 **Terapia Ocupacional** (com Wesley Oliveira)\\\\n👨‍👩‍👧 **Educação Parental** (com Gleisse Nunes Pires da Silva)\\\\n🧩 **Neuropsicologia** (com Karla Sanches e Camila Ribeiro)\\\\n\\\\n🚀 **Programas Especiais**:\\\\n• **VOAR**: Para crianças e adolescentes com TDAH\\\\n• **Leitura e Escrita**: Para dificuldades de aprendizagem\\\\n\\\\nSobre qual você gostaria de saber mais?';\\n\\n  results.push({\\n    json: {\\n      ...item.json,\\n      responseMessage: mensagem\\n    }\\n  });\\n}\\n\\nreturn results;"
+      }
+    },
+    {
+      "id": "16",
+      "name": "Informar E-mail",
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 1,
+      "position": [
+        2250,
+        500
+      ],
+      "parameters": {
+        "values": {
+          "string": [
+            {
+              "name": "responseMessage",
+              "value": "Para solicitar relatórios e laudos, por favor, envie um e-mail para **contato@clinicacognus.com.br** com os seguintes dados:\\n\\n📧 Nome completo\\n📧 CPF\\n📧 Tipo de documento solicitado\\n\\nO prazo de entrega é de até 7 dias úteis. ⏰"
+            }
+          ]
+        },
+        "options": {
+          "keepOnlySet": false
+        }
+      }
+    },
+    {
+      "id": "17",
+      "name": "Handoff Humano",
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 1,
+      "position": [
+        2250,
+        600
+      ],
+      "parameters": {
+        "values": {
+          "string": [
+            {
+              "name": "responseMessage",
+              "value": "Entendi! Vou transferir você para um de nossos atendentes que poderá te ajudar melhor. Aguarde um momento! 🙋‍♀️"
+            }
+          ]
+        },
+        "options": {
+          "keepOnlySet": false
+        }
+      }
+    },
+    {
+      "id": "18",
+      "name": "Create Card in Trello",
+      "type": "n8n-nodes-base.trello",
+      "typeVersion": 1,
+      "position": [
+        2450,
+        200
+      ],
+      "parameters": {
+        "operation": "create",
+        "boardId": "{{ID_DO_BOARD}}",
+        "listId": "={{ $json.trelloList }}",
+        "name": "Receita - {{ $json.dataw.fromName }}",
+        "description": "Paciente: {{ $json.dataw.fromName }}\\nTelefone: {{ $json.dataw.from }}\\nTipo: {{ $json.message.content.sub_intent.tipo_receita }}\\nLocalização: {{ $json.message.content.sub_intent.localizacao }}\\nData: {{ $now }}"
+      }
+    },
+    {
+      "id": "19",
+      "name": "Enviar texto",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 1,
+      "position": [
+        2650,
+        300
+      ],
+      "parameters": {
+        "url": "{{EVOLUTION_API_URL}}/message/sendText/{{INSTANCE_NAME}}",
+        "method": "POST",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "apikey",
+              "value": "={{$env.EVOLUTION_API_KEY}}"
+            }
+          ]
+        },
+        "sendBody": true,
+        "bodyParameters": {
+          "parameters": [
+            {
+              "name": "number",
+              "value": "={{ $json.dataw.from }}"
+            },
+            {
+              "name": "text",
+              "value": "={{ $json.responseMessage }}"
+            }
+          ]
+        },
+        "options": {
+          "timeout": 10000
+        }
+      }
+    }
+  ],
+  "connections": {
+    "Webhook WhatsApp Evolution": {
+      "main": [
+        [
+          {
+            "node": "playload",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "playload": {
+      "main": [
+        [
+          {
+            "node": "Switch1",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Switch1": {
+      "main": [
+        [
+          {
+            "node": "push",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Download Audio",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Download Audio": {
+      "main": [
+        [
+          {
+            "node": "transcript",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "transcript": {
+      "main": [
+        [
+          {
+            "node": "Set Transcription",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Set Transcription": {
+      "main": [
+        [
+          {
+            "node": "push",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "push": {
+      "main": [
+        [
+          {
+            "node": "Wait",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Wait": {
+      "main": [
+        [
+          {
+            "node": "msgs",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "msgs": {
+      "main": [
+        [
+          {
+            "node": "junta_msgs",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "junta_msgs": {
+      "main": [
+        [
+          {
+            "node": "AI Agent",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "AI Agent": {
+      "main": [
+        [
+          {
+            "node": "Switch por Intenção",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Switch por Intenção": {
+      "main": [
+        [
+          {
+            "node": "Processar Receita",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Processar Agendamento",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Processar Terapia",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Informar E-mail",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Handoff Humano",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Processar Receita": {
+      "main": [
+        [
+          {
+            "node": "Enviar texto",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Processar Agendamento": {
+      "main": [
+        [
+          {
+            "node": "Enviar texto",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Processar Terapia": {
+      "main": [
+        [
+          {
+            "node": "Enviar texto",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Informar E-mail": {
+      "main": [
+        [
+          {
+            "node": "Enviar texto",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Handoff Humano": {
+      "main": [
+        [
+          {
+            "node": "Enviar texto",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": false,
+  "settings": {},
+  "versionId": "v5.0"
+}
